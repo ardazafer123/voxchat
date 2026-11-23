@@ -18,7 +18,8 @@ def temp_store(case):
     """Point the account store at a fresh temp dir for one test."""
     root = case.enterContext(tempfile.TemporaryDirectory())
     for module, name, value in ((auth, 'ACCOUNTS_DIR', root + '/accounts'), (auth, 'ACTIVE_PATH', root + '/active'),
-                                (auth, 'DEFAULT_NPSSO_PATH', root + '/npsso'), (desktop, 'DEFAULT_NPSSO_PATH', root + '/npsso')):
+                                (auth, 'DEFAULT_NPSSO_PATH', root + '/npsso'), (desktop, 'DEFAULT_NPSSO_PATH', root + '/npsso'),
+                                (desktop, 'LOG_PATH', desktop.Path(root) / 'voxchat.log')):
         case.enterContext(patch.object(module, name, value))
     case.enterContext(patch.dict(os.environ, {'PSN_NPSSO': ''}))
     return root
