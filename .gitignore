@@ -1,0 +1,14 @@
+# Only the app goes in the repo. Notes, research files and sign-ins stay local.
+/*
+!/.gitignore
+!/README.md
+!/LICENSE
+!/client/
+!/.github/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
