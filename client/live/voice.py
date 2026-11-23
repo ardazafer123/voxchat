@@ -179,10 +179,8 @@ class PartyVoice:
                 continue
             if member.get('voiceChatActivated') is False:
                 continue
-            stun = await asyncio.to_thread(VoicePeer.stun_server)
-            self.log('STUN: ' + ('network' if stun == VoicePeer.NETWORK_STUN else 'Google (network STUN did not answer)'))
             peer = VoicePeer(self.source, self.output, self.relay, on_state=self.log, name=account,
-                             ice_servers=[RTCIceServer(stun)])
+                             ice_servers=[RTCIceServer(VoicePeer.NETWORK_STUN)])
             self.peers[account] = peer
             self.log('Starting a voice offer to the console; gathering local ICE candidates.')
             sdp = await asyncio.wait_for(peer.offer(), 30)

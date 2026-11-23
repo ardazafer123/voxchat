@@ -3,8 +3,6 @@ import asyncio
 import contextlib
 import json
 import os
-import socket
-import struct
 
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer, RTCRtpSender
 from aiortc.contrib.media import MediaRelay
@@ -16,33 +14,12 @@ from psclient.opus16k import install
 DEBUG = os.environ.get('PARTY_VOICE_DEBUG') == '1'
 
 
-def stun_answers(host, port=3478, timeout=1.0):
-    """True if a STUN Binding request to host gets any reply within timeout."""
-    request = struct.pack('!HHI', 1, 0, 0x2112A442) + os.urandom(12)
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(timeout)
-            sock.sendto(request, (host, port))
-            return sock.recv(2048)[8:20] == request[8:20]
-    except OSError:
-        return False
-
-
 class VoicePeer:
-    # The network's own STUN server is unreliable from some PCs: gathering can stall long enough
-    # for the phone to give up. A public STUN answers in ~30 ms and sees only this PC's IP address.
-    # So phone answers always use Google STUN. Console offers try the network STUN first (it worked
-    # with a console before) and fall back to Google; aiortc uses only the first STUN server it is
-    # given, hence the probe. shortcut: probed once per process, restart to re-check.
+    # Phone answers use a public STUN: the network's own one can stall gathering long enough for
+    # the phone to give up. Console offers always use the network STUN: with any other, the console
+    # never answers the connection checks (seen live). Gathering waits at most 5 s for it.
     NETWORK_STUN = 'stun:stn.np.community.playstation.net'
     PUBLIC_STUN = 'stun:stun.l.google.com:19302'
-    chosen_stun = None
-
-    @classmethod
-    def stun_server(cls):
-        if cls.chosen_stun is None:
-            cls.chosen_stun = cls.NETWORK_STUN if stun_answers('stn.np.community.playstation.net') else cls.PUBLIC_STUN
-        return cls.chosen_stun
 
     def __init__(self, source, output, relay: MediaRelay, on_state=print, ice_servers=None, name=None, send=True):
         """`name` labels received audio; a callable gets the track's SDP mid (bridge: one track per member).

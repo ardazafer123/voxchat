@@ -2569,6 +2569,8 @@ class PartyWindow(QWidget):
         if self.tray and not self.isActiveWindow():
             self.notice_page = page
             self.tray.showMessage(title, text, QApplication.windowIcon(), 8000)
+        write_log_file(f'Notification {title!r}: ' + ('shown' if self.tray and not self.isActiveWindow()
+                       else 'skipped, the window is in front' if self.tray else 'skipped, no tray'))
 
     def notify_invites(self, parties):
         ids = {p.get('sessionId') for p in parties}
@@ -2577,6 +2579,8 @@ class PartyWindow(QWidget):
                 owner = party.get('owner', {}).get('onlineId') or 'A friend'
                 if party.get('sessionId') not in self.seen_invites and owner != self.me:
                     self.notify('Party invitation', f'{owner} invited you to a party.')
+        else:
+            write_log_file(f'Watching for new invitations ({len(ids)} already there)')
         self.seen_invites = (self.seen_invites or set()) | ids
 
     def notify_requests(self, requests):

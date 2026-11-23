@@ -7,10 +7,8 @@ from aiortc import RTCPeerConnection, RTCConfiguration, RTCRtpSender
 from aiortc.contrib.media import MediaRelay
 from aiortc.jitterbuffer import JitterFrame
 
-import socket
-import threading
 
-from live.voice_peer import VoicePeer, stun_answers
+from live.voice_peer import VoicePeer
 from psclient.audio import AudioInput, AudioOutput
 from psclient.opus16k import Opus16kEncoder, Opus16kDecoder, install
 
@@ -134,22 +132,6 @@ class CodecTest(unittest.IsolatedAsyncioTestCase):
             b.stop()
             out_a.close()
             out_b.close()
-
-
-class StunProbeTest(unittest.TestCase):
-    def test_probe_needs_a_matching_reply(self):
-        server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        server.bind(('127.0.0.1', 0))
-        port = server.getsockname()[1]
-
-        def answer():
-            data, addr = server.recvfrom(2048)
-            server.sendto(b'\x01\x01\x00\x00' + data[4:20], addr)
-
-        threading.Thread(target=answer, daemon=True).start()
-        self.assertTrue(stun_answers('127.0.0.1', port))
-        server.close()
-        self.assertFalse(stun_answers('127.0.0.1', port, timeout=.2))
 
 
 class MicMutedTest(unittest.TestCase):
