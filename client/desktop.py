@@ -1,5 +1,6 @@
 """VoxChat desktop interface."""
 import argparse
+import logging
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ import queue
 import sys
 import threading
 import time
+import traceback
 import urllib.error
 
 from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QPointF, QRectF, QSize, QTimer, Qt,
@@ -20,8 +22,9 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QComboB
     QMessageBox, QPlainTextEdit, QStackedWidget, QVBoxLayout, QWidget)
 
 import os
+import platform
 
-from live.auth import (DEFAULT_NPSSO_PATH, AuthError, active_account, adopt_legacy_npsso,
+from live.auth import (CONFIG_DIR, DEFAULT_NPSSO_PATH, AuthError, active_account, adopt_legacy_npsso,
     list_accounts, remove_account, save_account, set_active, sign_in)
 from live import social
 from live.voice import SessionControl, account_allowed, discover, run
@@ -1477,6 +1480,7 @@ class PartyWindow(QWidget):
     def log(self, message):
         self.events.put(('log', message))
         print(message, flush=True)
+        write_log_file(message)
 
     def start_worker(self, action):
         if self.busy:
@@ -1495,6 +1499,8 @@ class PartyWindow(QWidget):
                     message = str(exc) if type(exc) is RuntimeError else type(exc).__name__
                 self.events.put(('error', message))
                 print('Session stopped:', message, flush=True)
+                if not isinstance(exc, AuthError):
+                    write_log_file('Session stopped:\n' + traceback.format_exc())
             finally:
                 self.events.put(('done', None))
 
@@ -2583,6 +2589,37 @@ def smoke_social(window, page):
     window.update_social()
 
 
+LOG_PATH = Path(CONFIG_DIR) / 'voxchat.log'
+_log_lock = threading.Lock()
+
+
+def write_log_file(message):
+    """Keep the connection log on disk too, so it can be attached to a bug report."""
+    try:
+        with _log_lock:
+            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if LOG_PATH.exists() and LOG_PATH.stat().st_size > 1_000_000:
+                LOG_PATH.replace(LOG_PATH.with_suffix('.log.old'))
+            with LOG_PATH.open('a', encoding='utf-8') as file:
+                file.write(f'{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n')
+    except OSError:
+        pass
+
+
+class _FileLogHandler(logging.Handler):
+    def emit(self, record):
+        write_log_file(f'[{record.name}] {record.getMessage()}')
+
+
+def setup_file_logging():
+    """Network library warnings (and ICE progress) go to the log file, never the UI."""
+    handler = _FileLogHandler(logging.INFO)
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().setLevel(logging.WARNING)
+    for name in ('aioice', 'aiortc'):
+        logging.getLogger(name).setLevel(logging.INFO)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--smoke', action='store_true', help=argparse.SUPPRESS)
@@ -2590,6 +2627,8 @@ def main():
     parser.add_argument('--smoke-page', choices=('messages', 'friends', 'add', 'settings', 'host'), help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.smoke = args.smoke or bool(args.smoke_page)
+    setup_file_logging()
+    write_log_file(f'VoxChat started on {platform.platform()}, Python {platform.python_version()}')
     app = QApplication(sys.argv[:1])
     app.setApplicationName('VoxChat')
     app.setDesktopFileName('voxchat')

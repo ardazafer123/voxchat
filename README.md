@@ -80,8 +80,11 @@ and allow network access if the firewall asks (Windows).
 
 - **The app won't open:** see the warnings under [Download](#download).
 - **Friends can't hear you:** check the microphone in **Settings**, and check that your computer allows VoxChat to use it.
+- **Stuck at "Connecting":** update to the newest version. Older versions had this problem on Windows.
 - **Anything else:** open an issue on the [Issues page](https://github.com/ardazafer123/voxchat/issues).
   Say what you did and what went wrong. Never post your `npsso` value or a screenshot that shows it.
+  It helps to attach `voxchat.log` from the `.config/psclient` folder. It can show your IP address
+  and Online IDs, so remove those first if you don't want them public.
 
 ## Install from source
 

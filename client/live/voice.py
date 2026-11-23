@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import signal
+import sys
 import threading
 import time
 
@@ -28,6 +29,13 @@ from live.whoami import account_id_from_token
 from psclient import custom_data, rest, signaling
 from psclient.audio import AudioInput, AudioOutput
 from psclient import push as push_protocol
+
+if sys.platform == 'win32':
+    # The default Windows loop stops reading a UDP socket for good after one ICMP
+    # error (for example "host unreachable" from an ICE check), so calls hang at
+    # "Connecting". The selector loop reports the error and keeps reading.
+    # shortcut: policies are deprecated from Python 3.14, switch to asyncio.run(loop_factory=...) then.
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 
 def initial_metadata():
