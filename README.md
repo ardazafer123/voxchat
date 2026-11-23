@@ -64,6 +64,10 @@ Sign out of that account in VoxChat and add it again with a fresh `npsso`.
 - **During a call:** the round microphone button mutes you, and **Leave** ends the call for you.
 - **Microphone and speakers:** pick them in **Settings** before you join. They can't be changed during a call.
 
+**Closing the window** keeps VoxChat running in the system tray (the menu bar on macOS), so a call keeps going.
+It also shows a notification for new party invitations and friend requests. To quit, right-click the tray icon
+and choose **Quit VoxChat**. If your desktop has no tray, closing the window quits.
+
 The first time you join, allow microphone access if your computer asks (macOS),
 and allow network access if the firewall asks (Windows).
 

@@ -276,6 +276,22 @@ class DesktopTest(unittest.TestCase):
         window.poll()
         self.assertFalse(window.isVisible())
 
+    def test_tray_notifies_only_new_invites_and_requests(self):
+        window = self.window
+        shown = []
+        window.tray = type('Tray', (), {'showMessage': lambda self, *a: shown.append(a[:2])})()
+        party = lambda sid, owner: {'sessionId': sid, 'owner': {'onlineId': owner}, 'members': [{}]}
+        window.notify_invites([party('a', 'pal')])  # first load only remembers
+        window.notify_invites([party('a', 'pal'), party('b', 'tester'), party('c', 'buddy')])
+        window.notify_requests([{'account_id': '1', 'online_id': 'old'}])
+        window.notify_requests([{'account_id': '1', 'online_id': 'old'}, {'account_id': '2', 'online_id': 'new'}])
+        window.show()
+        window.close()  # with a tray, closing only hides the window
+        self.assertFalse(window.isVisible())
+        self.assertEqual(shown, [('Party invitation', 'buddy invited you to a party.'),
+                                 ('Friend request', 'new sent you a friend request.'),
+                                 ('VoxChat is still running', 'It stays in the tray. Right-click its icon to quit.')])
+
     def test_rail_settings_and_avatar_accounts(self):
         window = self.window
         window.rail.select(desktop.SETTINGS)

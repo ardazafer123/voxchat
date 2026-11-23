@@ -19,7 +19,7 @@ from PySide6.QtGui import (QColor, QFont, QFontMetrics, QIcon, QLinearGradient, 
     QPen, QPixmap, QRadialGradient)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QComboBox,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-    QMessageBox, QPlainTextEdit, QStackedWidget, QVBoxLayout, QWidget)
+    QMenu, QMessageBox, QPlainTextEdit, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 import os
 import platform
@@ -56,6 +56,7 @@ ACCENT, VIOLET, LIVE, DANGER = '#4a7dff', '#8a5cff', '#3ddc97', '#ff4d67'
 # shortcut: each poll costs 1 + one GET per invitation; 3 s keeps that well under any plausible
 # server rate limit. Push events for invitations would make this instant; not implemented yet.
 INVITE_POLL_MS = 3000
+REQUEST_POLL_MS = 60_000  # friend requests change rarely; this only feeds notifications
 THEIRS = '#26324d'  # other person's chat bubble; must stand out from the dark stage
 
 STYLE = f'''
@@ -823,6 +824,11 @@ class PartyWindow(QWidget):
         self.invite_poll = QTimer(self)
         self.invite_poll.timeout.connect(self.poll_invitations)
         self.invite_poll.start(INVITE_POLL_MS)
+        self.request_poll = QTimer(self)
+        self.request_poll.timeout.connect(lambda: self.social(
+            'friends', lambda: (self.client().friends(), self.client().requests())))
+        self.request_poll.start(REQUEST_POLL_MS)
+        self.setup_tray()
 
     # Layout
 
@@ -1627,6 +1633,7 @@ class PartyWindow(QWidget):
         return row
 
     def reload_account(self):
+        self.seen_invites = self.seen_requests = None  # the first load per account never notifies
         accounts = list_accounts()
         active = active_account()
         current = next((a for a in accounts if a['account_id'] == active), None)
@@ -1723,9 +1730,8 @@ class PartyWindow(QWidget):
         self.show_party()
 
     def poll_invitations(self):
-        """Quiet background reload while the Parties page is open and idle."""
-        if (self.polling or self.busy or not self.me or self.offline or not self.isVisible()
-                or self.pages.currentIndex() != PARTIES):
+        """Quiet background reload while idle, also from the tray, so new invitations notify."""
+        if self.polling or self.busy or not self.me or self.offline:
             return
         self.polling = True
         self.want_faces({a['account_id']: a['online_id'] for a in list_accounts()})
@@ -2275,6 +2281,7 @@ class PartyWindow(QWidget):
             return
         if kind == 'parties-poll':
             self.polling = False
+            self.notify_invites(value)
             if not self.busy:  # a call or manual refresh owns the list meanwhile
                 if self.status.text() == 'Checking for invitations…':
                     self.set_status(f'{len(value)} invitation' + ('' if len(value) == 1 else 's') if value
@@ -2310,6 +2317,7 @@ class PartyWindow(QWidget):
             self.chat_list.setCurrentRow(0)
         elif kind == 'friends':
             self.friends, self.requests = value
+            self.notify_requests(self.requests)
             self.want_faces({f['account_id']: f['online_id'] for f in self.friends + self.requests})
             self.friends.sort(key=lambda f: (f.get('presence') != 'online', f['online_id'].lower()))
             self.show_friends()
@@ -2486,6 +2494,7 @@ class PartyWindow(QWidget):
                         self.invited -= {f['account_id'] for f in self.friends if f['online_id'] == name}  # allow retry
                     self.show_invites()
             elif kind == 'parties':
+                self.notify_invites(value)
                 self.set_parties(value)
                 if not getattr(self, 'quiet_refresh', False):
                     self.set_status(f'{len(value)} invitation' + ('' if len(value) == 1 else 's') if value
@@ -2525,7 +2534,67 @@ class PartyWindow(QWidget):
         # Check right away: the first sign-in alone takes seconds, so waiting a poll period felt idle.
         QTimer.singleShot(0, self.poll_invitations)
 
+    # Tray and notifications
+
+    def setup_tray(self):
+        """Closing the window keeps VoxChat in the tray, so calls and notifications keep going."""
+        self.tray, self.quitting, self.tray_told, self.notice_page = None, False, False, PARTIES
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return  # no tray (for example plain GNOME): closing the window quits, as before
+        self.tray = QSystemTrayIcon(QApplication.windowIcon(), self)
+        self.tray.setToolTip('VoxChat')
+        menu = QMenu(self)
+        menu.addAction('Open VoxChat', self.bring_back)
+        menu.addAction('Quit VoxChat', self.quit_app)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(
+            lambda reason: reason == QSystemTrayIcon.ActivationReason.Trigger and self.bring_back())
+        self.tray.messageClicked.connect(lambda: self.bring_back(self.notice_page))
+        self.tray.show()
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+
+    def bring_back(self, page=None):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if page is not None:
+            self.rail.select(page)
+
+    def quit_app(self):
+        self.quitting = True
+        self.close()
+
+    def notify(self, title, text, page=PARTIES):
+        """A system notification, only when VoxChat isn't the window in front."""
+        if self.tray and not self.isActiveWindow():
+            self.notice_page = page
+            self.tray.showMessage(title, text, QApplication.windowIcon(), 8000)
+
+    def notify_invites(self, parties):
+        ids = {p.get('sessionId') for p in parties}
+        if self.seen_invites is not None:
+            for party in parties:
+                owner = party.get('owner', {}).get('onlineId') or 'A friend'
+                if party.get('sessionId') not in self.seen_invites and owner != self.me:
+                    self.notify('Party invitation', f'{owner} invited you to a party.')
+        self.seen_invites = (self.seen_invites or set()) | ids
+
+    def notify_requests(self, requests):
+        ids = {r['account_id'] for r in requests}
+        if self.seen_requests is not None:
+            for request in requests:
+                if request['account_id'] not in self.seen_requests:
+                    self.notify('Friend request', f"{request['online_id']} sent you a friend request.", FRIENDS)
+        self.seen_requests = (self.seen_requests or set()) | ids
+
     def closeEvent(self, event):
+        if self.tray and not self.quitting and not self.closing:
+            event.ignore()
+            self.hide()
+            if not self.tray_told:
+                self.tray_told = True
+                self.notify('VoxChat is still running', 'It stays in the tray. Right-click its icon to quit.')
+            return
         if self.busy:
             self.closing = True
             self.leave()
@@ -2533,6 +2602,7 @@ class PartyWindow(QWidget):
             event.ignore()
         else:
             event.accept()
+            QApplication.quit()
 
 
 def smoke_social(window, page):
