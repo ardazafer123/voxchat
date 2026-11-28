@@ -86,6 +86,8 @@ and allow network access if the firewall asks (Windows).
 - Pictures and messages are not saved to disk.
 - VoxChat has no tracking and no servers of its own. It only talks to the network's servers,
   plus a public Google server that helps voice chat find a path through your router.
+- The downloaded app also asks GitHub every few hours whether a newer VoxChat is out,
+  and shows an **Update available** bar when one is. Nothing about you is sent.
 
 ## Problems?
 

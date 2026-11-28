@@ -160,6 +160,41 @@ class DesktopTest(unittest.TestCase):
         auth.save_account('444', 'tester', 'synthetic')
         self.window = PartyWindow()
 
+    def test_update_bar_shows_once_per_release(self):
+        from live import updates
+        self.assertTrue(updates.newer('v1.1.0', 'v1.2.0'))
+        self.assertTrue(updates.newer('v1.1.0', 'v1.1.10'))
+        self.assertFalse(updates.newer('v1.1.0', 'v1.1.0'))
+        self.assertFalse(updates.newer('v1.2.0', 'v1.1.9'))
+        self.assertFalse(updates.newer('dev', 'v1.2.0'))
+        window = self.window
+        self.assertTrue(window.update_bar.isHidden())
+        window.show_update('v1.1.0', 'v1.2.0', 'https://example.invalid/v1.2.0')
+        self.assertFalse(window.update_bar.isHidden())
+        self.assertIn('v1.2.0', window.update_text.text())
+        window.update_bar.hide()
+        window.show_update('v1.1.0', 'v1.2.0', 'https://example.invalid/v1.2.0')
+        self.assertTrue(window.update_bar.isHidden())  # hidden stays hidden for the same release
+
+    def test_wheel_notch_glides_and_trophy_tooltip_has_no_own_style(self):
+        from PySide6.QtCore import QPoint, QPointF
+        from PySide6.QtGui import QWheelEvent
+        from PySide6.QtWidgets import QListWidget
+        view = QListWidget()
+        view.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
+        view.addItems([f'game {i}' for i in range(200)])
+        view.resize(200, 300)
+        view.show()
+        bar = view.verticalScrollBar()
+        wheel = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        self.assertTrue(desktop.SmoothScroll().eventFilter(view.viewport(), wheel))
+        self.assertLess(bar.value(), desktop.SmoothScroll.STEP)  # not there yet: it glides
+        bar.glide.setCurrentTime(bar.glide.duration())
+        self.assertEqual(bar.value(), desktop.SmoothScroll.STEP)
+        trophy = desktop.Trophy('gold')
+        self.assertEqual((trophy.toolTip(), trophy.styleSheet()), ('Gold', ''))
+
     def test_share_card_plays_inline_then_pops_out(self):
         from types import SimpleNamespace
         import av

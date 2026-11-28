@@ -13,11 +13,11 @@ import time
 import traceback
 import urllib.error
 
-from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QPointF, QRectF, QSize, QTimer, Qt,
-    QVariantAnimation)
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QLinearGradient, QPainter, QPainterPath,
+from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QEvent, QObject, QPointF, QRectF, QSize, QTimer, Qt,
+    QUrl, QVariantAnimation)
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient)
-from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QComboBox,
+from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QApplication, QCheckBox, QComboBox,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
     QMenu, QMessageBox, QPlainTextEdit, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
@@ -26,7 +26,7 @@ import platform
 
 from live.auth import (CONFIG_DIR, DEFAULT_NPSSO_PATH, AuthError, active_account, adopt_legacy_npsso,
     list_accounts, remove_account, save_account, set_active, sign_in)
-from live import social
+from live import social, updates
 from live.share_view import DEFAULT_QUALITY, QUALITIES
 from live.voice import BLOCKED, SessionControl, account_allowed, discover, run
 from live.whoami import account_id_from_token, get_own_profile
@@ -99,6 +99,8 @@ QListWidget#thread::item, QListWidget#thread::item:hover {{ background: transpar
 QFrame#composerBox {{ background: {SURFACE2}; border: 1px solid {LINE}; border-radius: 26px; }}
 QLineEdit#composer {{ background: transparent; border: 0; padding: 8px 0; }}
 QLabel#unread {{ color: #ffffff; background: {ACCENT}; border-radius: 10px; padding: 1px 7px; font-size: 11px; font-weight: 700; }}
+QFrame#updateBar {{ background: #12245c; border-bottom: 1px solid #2c4aa8; }}
+QLabel#updateText {{ color: {TEXT}; }}
 QToolTip {{ background: {SURFACE2}; color: {TEXT}; border: 1px solid {LINE}; padding: 4px 8px; }}
 '''
 
@@ -286,6 +288,14 @@ def draw_icon(painter, name, rect, color, width=2.0):
     elif name == 'pip':
         path.addRoundedRect(QRectF(3, 5, 18, 14), 2, 2)
         path.addRoundedRect(QRectF(12, 12, 6.5, 4.5), 1, 1)
+    elif name == 'download':
+        path.moveTo(12, 4)
+        path.lineTo(12, 15)
+        path.moveTo(7, 10)
+        path.lineTo(12, 15)
+        path.lineTo(17, 10)
+        path.moveTo(5, 19.5)
+        path.lineTo(19, 19.5)
     elif name == 'expand':
         for x, y, dx, dy in ((4, 9, 0, -5), (15, 4, 5, 0), (20, 15, 0, 5), (9, 20, -5, 0)):
             path.moveTo(x, y)
@@ -303,7 +313,7 @@ def blend(a, b, t):
 
 class Button(QAbstractButton):
     """Painted button: hover tint and a short press scale for feedback."""
-    COLORS = {'ghost': ('#00000000', SURFACE2, TEXT2), 'soft': (SURFACE2, '#1d2742', TEXT),
+    COLORS = {'ghost': ('#00' + SURFACE2[1:], SURFACE2, TEXT2), 'soft': (SURFACE2, '#1d2742', TEXT),
               'accent': (ACCENT, '#6390ff', '#ffffff'), 'danger': (DANGER, '#ff6a80', '#ffffff')}
 
     def __init__(self, icon=None, text='', variant='soft', size=44, round_=False, tip=''):
@@ -353,6 +363,8 @@ class Button(QAbstractButton):
         base, hover, fg = self.COLORS[self.variant]
         if self.isCheckable() and self.isChecked():
             base, hover, fg = ('#18234a', '#1e2b58', TEXT) if self.variant == 'ghost' else (TEXT, '#ffffff', BG)
+        elif self.isCheckable() and self.variant == 'ghost':
+            base, hover = '#00' + BG[1:], BG  # tab bars sit on SURFACE2, so hover darkens instead
         if not self.isEnabled():
             return QColor(SURFACE2 if self.variant != 'ghost' else '#00000000'), QColor(TEXT3)
         return blend(base, hover, self.hover), QColor(fg)
@@ -513,6 +525,7 @@ class Avatar(QWidget):
             draw_icon(painter, 'mic-off', QRectF(spot.x() - side / 2, spot.y() - side / 2, side, side), '#ffffff', 2.4)
 
 
+ASSETS = Path(__file__).resolve().parent / 'assets'
 IMAGES = {}  # image URL -> QPixmap (game and trophy art), memory only like FACES
 TROPHY_COLORS = {'platinum': '#b9c8e6', 'gold': '#e8b64c', 'silver': '#b4bcc9', 'bronze': '#c7834f'}
 
@@ -588,20 +601,69 @@ class Bar(QWidget):
                                     radius, radius)
 
 
+class Trophy(QWidget):
+    """Trophy picture for its type; the tooltip names the type."""
+    PICTURES = {}  # type -> QPixmap, loaded once
+
+    def __init__(self, kind, size=16):
+        super().__init__()
+        self.kind = kind if kind in TROPHY_COLORS else 'bronze'
+        self.setFixedSize(size, size)
+        self.setToolTip(self.kind.title())
+
+    def paintEvent(self, event):
+        picture = self.PICTURES.get(self.kind)
+        if picture is None:
+            picture = self.PICTURES[self.kind] = QPixmap(str(ASSETS / f'trophy-{self.kind}.png'))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        painter.drawPixmap(self.rect(), picture)
+
+
+class SmoothScroll(QObject):
+    """Mouse-wheel notches glide a short distance instead of jumping three rows. Touchpads keep their own scrolling."""
+    STEP = 90  # pixels per wheel notch
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.Wheel or not isinstance(obj, QWidget):
+            return False
+        if not event.pixelDelta().isNull() or not event.angleDelta().y() or event.modifiers():
+            return False
+        area = obj
+        while area is not None and not isinstance(area, QAbstractScrollArea):
+            if isinstance(area, QComboBox):
+                return False  # the wheel picks a value there
+            area = area.parentWidget()
+        if area is None:
+            return False
+        bar = area.verticalScrollBar()
+        if bar.maximum() == bar.minimum():
+            return False
+        glide = getattr(bar, 'glide', None)
+        if glide is None:
+            glide = bar.glide = QVariantAnimation(bar)
+            glide.setDuration(220)
+            glide.setEasingCurve(QEasingCurve.Type.OutCubic)
+            glide.valueChanged.connect(lambda value, bar=bar: bar.setValue(round(value)))
+        aim = glide.endValue() if glide.state() == QVariantAnimation.State.Running else bar.value()
+        aim = max(bar.minimum(), min(bar.maximum(), aim - event.angleDelta().y() / 120 * self.STEP))
+        glide.stop()
+        glide.setStartValue(float(bar.value()))
+        glide.setEndValue(float(aim))
+        glide.start()
+        return True
+
+
 def trophy_counts(counts, total=None, size=12):
-    """Coloured dot and number per trophy type, e.g. '● 2  ● 6'; 'earned/defined' when total is given."""
+    """Trophy icon and number per trophy type, e.g. '● 2  ● 6'; 'earned/defined' when total is given."""
     widget = QWidget()
     row = QHBoxLayout(widget)
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(10)
-    for kind, color in TROPHY_COLORS.items():
+    for kind in TROPHY_COLORS:
         if total is not None and not total.get(kind):
             continue  # a game without a platinum shows no platinum slot
-        dot = QLabel()
-        dot.setFixedSize(size - 2, size - 2)
-        dot.setStyleSheet(f'background: {color}; border-radius: {(size - 2) // 2}px;')
-        dot.setToolTip(kind.title())
-        row.addWidget(dot)
+        row.addWidget(Trophy(kind, size + 8))
         text = str(counts.get(kind, 0)) + (f"/{total[kind]}" if total is not None else '')
         number = label(text, 'small' if size < 14 else 'h3')
         row.addWidget(number)
@@ -1231,7 +1293,28 @@ class PartyWindow(QWidget):
         self.rail.column.addStretch()
         self.rail.add('gear', 'Settings')
         root.addWidget(self.rail)
-        root.addWidget(self.pages, 1)
+        content = QWidget()
+        stack = QVBoxLayout(content)
+        stack.setContentsMargins(0, 0, 0, 0)
+        stack.setSpacing(0)
+        self.update_bar = QFrame()
+        self.update_bar.setObjectName('updateBar')
+        bar_row = QHBoxLayout(self.update_bar)
+        bar_row.setContentsMargins(24, 8, 12, 8)
+        bar_row.setSpacing(10)
+        self.update_text = label('', 'updateText')
+        bar_row.addWidget(self.update_text, 1)
+        download = Button('download', 'Download', variant='accent', size=34)
+        download.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(self.update_url)))
+        bar_row.addWidget(download)
+        hide = Button('close', variant='ghost', size=34, round_=True, tip='Hide until VoxChat restarts')
+        hide.clicked.connect(self.update_bar.hide)
+        bar_row.addWidget(hide)
+        self.update_bar.hide()
+        self.update_tag = self.update_url = None
+        stack.addWidget(self.update_bar)
+        stack.addWidget(self.pages, 1)
+        root.addWidget(content, 1)
         self.hosting, self.invited = False, set()
         self.conversations, self.thread, self.friends, self.requests, self.results = [], None, [], [], []
         self.social_client, self.loaded, self.generation = None, set(), 0
@@ -1245,6 +1328,10 @@ class PartyWindow(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(100)
+        QTimer.singleShot(5000, self.check_updates)
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.check_updates)
+        self.update_timer.start(6 * 3600 * 1000)  # also catch releases while VoxChat sits in the tray
         self.ticker = QTimer(self)  # runs only during a call
         self.ticker.timeout.connect(self.tick)
         self.invite_poll = QTimer(self)
@@ -2394,10 +2481,7 @@ class PartyWindow(QWidget):
         kind = QHBoxLayout()
         kind.setSpacing(6)
         kind.addStretch()
-        dot = QLabel()
-        dot.setFixedSize(10, 10)
-        dot.setStyleSheet(f"background: {TROPHY_COLORS.get(trophy['type'], TEXT3)}; border-radius: 5px;")
-        kind.addWidget(dot)
+        kind.addWidget(Trophy(trophy['type'], 22))
         kind.addWidget(label((trophy['type'] or '').title(), 'small'))
         side.addLayout(kind)
         when = ago(trophy.get('earned_at'))
@@ -2970,6 +3054,8 @@ class PartyWindow(QWidget):
                 generation, name, payload = value
                 if generation == self.generation:
                     (self.social_result if kind == 'social' else self.social_failed)(name, payload)
+            elif kind == 'update':
+                self.show_update(*value)
             elif kind == 'accounts':
                 self.reload_account()
             elif kind == 'signed-in':
@@ -3001,6 +3087,32 @@ class PartyWindow(QWidget):
     def showEvent(self, event):
         # Check right away: the first sign-in alone takes seconds, so waiting a poll period felt idle.
         QTimer.singleShot(0, self.poll_invitations)
+
+    # Updates
+
+    def check_updates(self):
+        current = updates.current_version()
+        if not current or self.offline:
+            return  # source runs have no version file and update with git
+
+        def work():
+            try:
+                tag, url = updates.latest_release()
+            except Exception as exc:
+                print('Update check failed:', type(exc).__name__, flush=True)
+                return
+            if updates.newer(current, tag):
+                self.events.put(('update', (current, tag, url)))
+
+        threading.Thread(target=work, name='update-check', daemon=True).start()
+
+    def show_update(self, current, tag, url):
+        if tag == self.update_tag:
+            return  # already shown (or hidden by the user) for this release
+        self.update_tag, self.update_url = tag, url
+        self.update_text.setText(f'<b>Update available:</b> VoxChat {tag} is out. You have {current}.')
+        self.update_bar.show()
+        self.notify('Update available', f'VoxChat {tag} is ready to download.')
 
     # Tray and notifications
 
@@ -3174,8 +3286,10 @@ def main():
     app = QApplication(sys.argv[:1])
     app.setApplicationName('VoxChat')
     app.setDesktopFileName('voxchat')
-    app.setWindowIcon(QIcon(str(Path(__file__).resolve().parent / 'assets' / 'voxchat.svg')))
+    app.setWindowIcon(QIcon(str(ASSETS / 'voxchat.svg')))
     app.setFont(QFont('Noto Sans', 10))
+    smooth = SmoothScroll(app)
+    app.installEventFilter(smooth)
     window = PartyWindow()
     window.offline = args.smoke or args.smoke_call
     window.show()

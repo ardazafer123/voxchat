@@ -12,3 +12,6 @@ __pycache__/
 *.pyc
 build/
 dist/
+
+# Written by the release build
+client/assets/version.txt
