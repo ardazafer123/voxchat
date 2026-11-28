@@ -14,6 +14,13 @@
 > can be **suspended or permanently banned**. Only use an account you are okay with losing.
 > You use this app at your own risk.
 
+> [!WARNING]
+> ## 🎮 NEW ACCOUNTS MUST SIGN IN ON A CONSOLE FIRST
+> The network keeps party voice chat **turned off** for accounts that have never signed in on a real console.
+> If you made a new account for VoxChat, sign in to it **once on a console** first (or ask a friend you trust to).
+> Until then, VoxChat shows **"Parties are blocked for this account"** and you can't join or start parties.
+> A quick check: if parties work for that account in the official phone app, they work in VoxChat too.
+
 ## What it does
 
 - **Party voice chat.** Join a party a friend invites you to, or start your own and invite friends.

@@ -64,10 +64,15 @@ def save_hosted(account, ids):
         f.write(''.join(i + '\n' for i in ids[-10:]))
 
 
+# HTTP 403 on party calls: the network keeps voice chat off for accounts never signed in on a console.
+BLOCKED = ('Parties are blocked for this account (HTTP 403). New accounts must sign in once '
+           'on a real console before they can use voice chat.')
+
+
 async def discover(token):
     response = await asyncio.to_thread(get, 'sessionManager', '/v2/users/me/partySessionsInvitations', token)
     if response.status != 200 or not isinstance(response.body, dict):
-        raise RuntimeError(f'Invitation discovery failed: HTTP {response.status}')
+        raise RuntimeError(BLOCKED if response.status == 403 else f'Invitation discovery failed: HTTP {response.status}')
     sessions = set()
 
     def visit(value):
@@ -507,6 +512,8 @@ async def run(args, control=None, log=print):
             else:
                 result = await asyncio.to_thread(send_spec, rest.join_party(sid, member), token)
             uncertain_join = False
+            if create and result.status == 403:
+                raise RuntimeError(BLOCKED)
             if not 200 <= result.status < 300:
                 raise RuntimeError(f"Party {'create' if create else 'join'} failed: HTTP {result.status}")
             joined = True

@@ -174,3 +174,12 @@ class HostedPartiesTest(unittest.TestCase):
             found = asyncio.run(voice.discover('token'))
             self.assertEqual({p['sessionId'] for p in found}, {'invited', 'mine'})
             self.assertEqual(voice.hosted_ids('42'), ['mine'])
+
+    def test_discover_403_explains_new_account_block(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        import live.voice as voice
+
+        with patch.object(voice, 'get', lambda *a: SimpleNamespace(status=403, body={})):
+            with self.assertRaisesRegex(RuntimeError, 'sign in once'):
+                asyncio.run(voice.discover('token'))

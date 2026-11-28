@@ -28,7 +28,7 @@ from live.auth import (CONFIG_DIR, DEFAULT_NPSSO_PATH, AuthError, active_account
     list_accounts, remove_account, save_account, set_active, sign_in)
 from live import social
 from live.share_view import DEFAULT_QUALITY, QUALITIES
-from live.voice import SessionControl, account_allowed, discover, run
+from live.voice import BLOCKED, SessionControl, account_allowed, discover, run
 from live.whoami import account_id_from_token, get_own_profile
 
 NPSSO_URL = 'https://ca.account.sony.com/api/v1/ssocookie'
@@ -88,6 +88,8 @@ QComboBox QAbstractItemView {{ background: {SURFACE2}; border: 1px solid {LINE};
 QPlainTextEdit {{ background: {BG}; color: {TEXT2}; border: 1px solid {LINE}; border-radius: 12px; padding: 10px; font-family: monospace; font-size: 12px; }}
 QFrame#warn {{ background: #2a1220; border: 1px solid #5a2236; border-radius: 12px; }}
 QLabel#warnText {{ color: #ffb3c0; }}
+QFrame#blocked {{ background: #3d0f1c; border: 1px solid {DANGER}; border-radius: 12px; margin-top: 16px; }}
+QLabel#blockedText {{ color: #ffd0d8; }}
 QLineEdit {{ background: {SURFACE2}; border: 1px solid {LINE}; border-radius: 12px; padding: 10px 12px; selection-background-color: {ACCENT}; }}
 QLineEdit:focus {{ border-color: {ACCENT}; }}
 QCheckBox {{ spacing: 10px; color: {TEXT2}; }}
@@ -1340,6 +1342,17 @@ class PartyWindow(QWidget):
         chip_row.addWidget(self.status)
         top.addWidget(chip, 0, Qt.AlignmentFlag.AlignTop)
         body.addLayout(top)
+        self.blocked = QFrame()
+        self.blocked.setObjectName('blocked')
+        blocked_box = QVBoxLayout(self.blocked)
+        blocked_box.setContentsMargins(16, 12, 16, 12)
+        blocked_text = label('<b>Parties are blocked for this account.</b> New accounts must sign in once on a real '
+                             'console before they can use voice chat. If parties work for this account in the '
+                             'official phone app, they work here too.', 'blockedText')
+        blocked_text.setWordWrap(True)
+        blocked_box.addWidget(blocked_text)
+        self.blocked.hide()
+        body.addWidget(self.blocked)
 
         self.stage_pages = QStackedWidget()
         empty = QWidget()
@@ -1757,6 +1770,11 @@ class PartyWindow(QWidget):
         return inputs, outputs
 
     # View updates
+
+    def show_blocked(self, blocked):
+        self.blocked.setVisible(blocked)
+        if blocked:
+            self.set_status('Parties blocked', 'error')
 
     def set_status(self, text, state='idle'):
         self.status.setText(text)
@@ -2177,7 +2195,7 @@ class PartyWindow(QWidget):
             return
         self.polling = True
         self.want_faces({a['account_id']: a['online_id'] for a in list_accounts()})
-        if 'parties-poll' not in self.loaded:  # first load for this account: say so
+        if 'parties-poll' not in self.loaded and self.blocked.isHidden():  # first load for this account: say so
             self.set_status('Checking for invitations…', 'busy')
         self.social('parties-poll', lambda: asyncio.run(discover(self.client().token())))
 
@@ -2723,6 +2741,7 @@ class PartyWindow(QWidget):
             return
         if kind == 'parties-poll':
             self.polling = False
+            self.show_blocked(False)
             self.notify_invites(value)
             if not self.busy:  # a call or manual refresh owns the list meanwhile
                 if self.status.text() == 'Checking for invitations…':
@@ -2793,7 +2812,9 @@ class PartyWindow(QWidget):
             return
         if kind == 'parties-poll':
             self.polling = False  # stay quiet; the next poll retries
-            if self.status.text() == 'Checking for invitations…':
+            if message == BLOCKED:
+                self.show_blocked(True)
+            elif self.status.text() == 'Checking for invitations…':
                 self.set_status(message, 'error')
             return
         if kind in ('conversations',):
@@ -2810,6 +2831,7 @@ class PartyWindow(QWidget):
 
     def reset_social(self):
         self.generation += 1  # drop late results from the previous account
+        self.show_blocked(False)
         self.social_client = None
         self.loaded = set()
         self.conversations, self.thread, self.friends, self.requests, self.results = [], None, [], [], []
@@ -2916,7 +2938,9 @@ class PartyWindow(QWidget):
                 break
             if kind in ('log', 'error'):
                 self.log_box.appendPlainText(value)
-                if kind == 'error':
+                if kind == 'error' and value == BLOCKED:
+                    self.show_blocked(True)
+                elif kind == 'error':
                     self.set_status('Stopped · ' + value, 'error')
                 elif value == 'WebRTC: connected':
                     self.connected_at = self.connected_at or time.monotonic()
@@ -2936,6 +2960,7 @@ class PartyWindow(QWidget):
                         self.invited -= {f['account_id'] for f in self.friends if f['online_id'] == name}  # allow retry
                     self.show_invites()
             elif kind == 'parties':
+                self.show_blocked(False)
                 self.notify_invites(value)
                 self.set_parties(value)
                 if not getattr(self, 'quiet_refresh', False):
