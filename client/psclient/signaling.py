@@ -22,6 +22,12 @@ def wrap(sender: str, frame: bytes, platform: int = MOBILE) -> str:
     return PREFIX + base64.b64encode(header + frame).decode('ascii')
 
 
+def share_request(sender: str, mode: int = 2, platform: int = MOBILE) -> str:
+    """Ask a member who shares their screen to send the full stream (data type 4, u32 2 = start watching)."""
+    header = HEADER.pack(1, 0, 4, 0, int(sender), platform, 0, 0, 4)
+    return PREFIX + base64.b64encode(header + struct.pack('<I', mode)).decode('ascii')
+
+
 def unwrap(payload: str) -> tuple[str, int, bytes]:
     if not isinstance(payload, str) or not payload.startswith(PREFIX):
         raise ValueError('Unsupported signaling envelope')

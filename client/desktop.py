@@ -15,7 +15,7 @@ import urllib.error
 
 from PySide6.QtCore import (QEasingCurve, QElapsedTimer, QPointF, QRectF, QSize, QTimer, Qt,
     QVariantAnimation)
-from PySide6.QtGui import (QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter, QPainterPath,
+from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QIcon, QImage, QLinearGradient, QPainter, QPainterPath,
     QPen, QPixmap, QRadialGradient)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QComboBox,
     QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
@@ -27,6 +27,7 @@ import platform
 from live.auth import (CONFIG_DIR, DEFAULT_NPSSO_PATH, AuthError, active_account, adopt_legacy_npsso,
     list_accounts, remove_account, save_account, set_active, sign_in)
 from live import social
+from live.share_view import DEFAULT_QUALITY, QUALITIES
 from live.voice import SessionControl, account_allowed, discover, run
 from live.whoami import account_id_from_token, get_own_profile
 
@@ -272,6 +273,22 @@ def draw_icon(painter, name, rect, color, width=2.0):
         path.lineTo(8, 14.5)
         path.addEllipse(QPointF(15.5, 11.5), .8, .8)
         path.addEllipse(QPointF(17.5, 13.5), .8, .8)
+    elif name == 'screen':
+        path.addRoundedRect(QRectF(3, 4.5, 18, 12), 2, 2)
+        path.moveTo(9, 20)
+        path.lineTo(15, 20)
+        path.moveTo(12, 16.5)
+        path.lineTo(12, 20)
+    elif name == 'stop':
+        path.addRoundedRect(QRectF(6.5, 6.5, 11, 11), 2, 2)
+    elif name == 'pip':
+        path.addRoundedRect(QRectF(3, 5, 18, 14), 2, 2)
+        path.addRoundedRect(QRectF(12, 12, 6.5, 4.5), 1, 1)
+    elif name == 'expand':
+        for x, y, dx, dy in ((4, 9, 0, -5), (15, 4, 5, 0), (20, 15, 0, 5), (9, 20, -5, 0)):
+            path.moveTo(x, y)
+            path.lineTo(x + dx, y + dy)
+            path.lineTo(x + dx + (5 if dy < 0 else -5 if dy > 0 else 0), y + dy + (5 if dx > 0 else -5 if dx < 0 else 0))
     painter.drawPath(path)
     painter.restore()
 
@@ -762,6 +779,413 @@ class EmptyArt(QWidget):
         draw_icon(painter, self.icon, QRectF(76, 76, 28, 28), TEXT2)
 
 
+def keep_above(window, size):
+    """Pin a window above every other one, in the bottom-right corner of its screen.
+
+    Wayland ignores Qt's stay-on-top flag and lets no client place itself, so on KDE ask
+    KWin to do both through a one-shot script."""
+    if QGuiApplication.platformName() != 'wayland':
+        area = window.screen().availableGeometry()  # the stay-on-top flag already works here
+        window.move(area.right() - size.width() - 24, area.bottom() - size.height() - 24)
+        return
+    if 'KDE' not in os.environ.get('XDG_CURRENT_DESKTOP', ''):
+        return  # shortcut: other Wayland desktops need the user's own "keep above" window rule
+    import tempfile
+    from PySide6.QtDBus import QDBusConnection, QDBusInterface
+    script = (
+        'const all = workspace.windowList ? workspace.windowList() : workspace.clientList();\n'
+        f'for (const w of all) if (w.pid === {os.getpid()} && w.caption === {window.windowTitle()!r}) {{\n'
+        '  w.keepAbove = true;\n'
+        '  const a = workspace.clientArea(KWin.PlacementArea, w);\n'
+        f'  w.frameGeometry = {{x: a.x + a.width - {size.width() + 24}, y: a.y + a.height - {size.height() + 24},'
+        f' width: {size.width()}, height: {size.height()}}};\n'
+        '}\n')
+    with tempfile.NamedTemporaryFile('w', suffix='.js', delete=False) as file:
+        file.write(script)
+    bus = QDBusConnection.sessionBus()
+    scripting = QDBusInterface('org.kde.KWin', '/Scripting', 'org.kde.kwin.Scripting', bus)
+    name = f'voxchat-keep-above-{os.getpid()}'
+    scripting.call('unloadScript', name)
+    reply = scripting.call('loadScript', file.name, name)
+    if reply.arguments():
+        QDBusInterface('org.kde.KWin', f'/Scripting/Script{reply.arguments()[0]}', 'org.kde.kwin.Script', bus).call('run')
+    QTimer.singleShot(1000, lambda: (scripting.call('unloadScript', name), os.unlink(file.name)))
+
+
+class ScreenView(QWidget):
+    """The latest shared-screen frame, letterboxed on black."""
+
+    def __init__(self):
+        super().__init__()
+        self.image = None
+
+    def set_frame(self, frame):
+        if frame is None:
+            self.image = None
+        else:
+            # Scale in the decoder's converter, not per paint: a 1080p frame is ~6 MB of RGB.
+            ratio = self.devicePixelRatioF()
+            size = QSize(frame.width, frame.height).scaled(
+                QSize(round(self.width() * ratio), round(self.height() * ratio)), Qt.AspectRatioMode.KeepAspectRatio)
+            width, height = max(2, size.width() // 2 * 2), max(2, size.height() // 2 * 2)
+            rgb = frame.to_ndarray(width=width, height=height, format='rgb24')
+            self.image = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format.Format_RGB888).copy()
+        self.update()
+
+    def paint_frame(self, painter):
+        painter.fillRect(self.rect(), QColor('#000000'))
+        if self.image is not None:
+            size = self.image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            painter.drawImage(QRectF((self.width() - size.width()) / 2, (self.height() - size.height()) / 2,
+                                     size.width(), size.height()), self.image)
+
+    def paintEvent(self, event):
+        self.paint_frame(QPainter(self))
+
+
+class FloatingScreen(ScreenView):
+    """Borderless picture-in-picture that stays above other windows, or full screen.
+
+    Drag to move, drag an edge to resize. Double-click or Esc goes back into the app;
+    the hover × stops watching."""
+    TITLE = 'VoxChat picture-in-picture'
+    EDGE = 10
+
+    def __init__(self, on_back, on_stop, full=False):
+        super().__init__()
+        self.on_back, self.on_stop, self.full = on_back, on_stop, full
+        self.hover, self.pressed = False, None
+        flags = Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        self.setWindowFlags(flags if full else flags | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowTitle(self.TITLE)
+        self.setMinimumSize(256, 144)
+        self.setMouseTracking(True)
+        self.resize(480, 270)
+
+    def open(self):
+        if self.full:
+            self.showFullScreen()
+        else:
+            self.show()
+            keep_above(self, self.size())
+
+    def close_rect(self):
+        return QRectF(self.width() - 40, 10, 30, 30)
+
+    def edges(self, pos):
+        if self.full:
+            return Qt.Edge(0)
+        edges = Qt.Edge(0)
+        if pos.x() < self.EDGE:
+            edges |= Qt.Edge.LeftEdge
+        if pos.x() > self.width() - self.EDGE:
+            edges |= Qt.Edge.RightEdge
+        if pos.y() < self.EDGE:
+            edges |= Qt.Edge.TopEdge
+        if pos.y() > self.height() - self.EDGE:
+            edges |= Qt.Edge.BottomEdge
+        return edges
+
+    def enterEvent(self, event):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self.hover = False
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self.hover and self.close_rect().contains(event.position()):
+            self.on_stop()
+            return
+        edges = self.edges(event.position())
+        if edges:
+            self.windowHandle().startSystemResize(edges)
+        else:
+            self.pressed = event.position()  # move starts once the mouse travels, so double-clicks still arrive
+
+    def mouseMoveEvent(self, event):
+        if self.pressed is not None and not self.full:
+            if (event.position() - self.pressed).manhattanLength() > 4:
+                self.pressed = None
+                self.windowHandle().startSystemMove()
+            return
+        cursors = {Qt.Edge.LeftEdge | Qt.Edge.TopEdge: Qt.CursorShape.SizeFDiagCursor,
+                   Qt.Edge.RightEdge | Qt.Edge.BottomEdge: Qt.CursorShape.SizeFDiagCursor,
+                   Qt.Edge.RightEdge | Qt.Edge.TopEdge: Qt.CursorShape.SizeBDiagCursor,
+                   Qt.Edge.LeftEdge | Qt.Edge.BottomEdge: Qt.CursorShape.SizeBDiagCursor,
+                   Qt.Edge.LeftEdge: Qt.CursorShape.SizeHorCursor, Qt.Edge.RightEdge: Qt.CursorShape.SizeHorCursor,
+                   Qt.Edge.TopEdge: Qt.CursorShape.SizeVerCursor, Qt.Edge.BottomEdge: Qt.CursorShape.SizeVerCursor}
+        self.setCursor(cursors.get(self.edges(event.position()), Qt.CursorShape.ArrowCursor))
+
+    def mouseReleaseEvent(self, event):
+        self.pressed = None
+
+    def mouseDoubleClickEvent(self, event):
+        self.on_back()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.on_back()
+        else:
+            super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        event.accept()
+        self.on_back()  # e.g. closed from the taskbar
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        self.paint_frame(painter)
+        if self.hover:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            rect = self.close_rect()
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 150))
+            painter.drawEllipse(rect)
+            draw_icon(painter, 'close', rect.adjusted(7, 7, -7, -7), '#ffffff', 2.4)
+
+
+class ShareCard(ScreenView):
+    """The inline shared-screen tile: a live badge and play button, then the stream itself."""
+
+    def __init__(self, on_click, on_double_click):
+        super().__init__()
+        self.on_click, self.on_double_click = on_click, on_double_click
+        self.name, self.note, self.playing, self.bar = '', '', False, None
+        self.setFixedSize(448, 252)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def fit(self, height):
+        """Fill the given height at 16:9, between 144 and 252 pixels tall."""
+        height = max(144, min(252, height))
+        self.setFixedSize(height * 16 // 9, height)
+
+    def resizeEvent(self, event):
+        if self.bar:
+            self.bar.setGeometry(10, self.height() - 46, self.width() - 20, 36)
+
+    def enterEvent(self, event):
+        if self.bar:
+            self.bar.setVisible(self.playing)
+
+    def leaveEvent(self, event):
+        if self.bar:
+            self.bar.hide()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.on_click()
+
+    def mouseDoubleClickEvent(self, event):
+        self.on_double_click()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        clip = QPainterPath()
+        clip.addRoundedRect(QRectF(self.rect()), 16, 16)
+        painter.setClipPath(clip)
+        if self.image is not None:
+            self.paint_frame(painter)
+        else:
+            glow = QRadialGradient(QPointF(self.width() / 2, self.height() * .4), self.width() * .7)
+            glow.setColorAt(0, QColor('#1a2547'))
+            glow.setColorAt(1, QColor(SURFACE))
+            painter.fillRect(self.rect(), glow)
+        top = QLinearGradient(0, 0, 0, 64)
+        top.setColorAt(0, QColor(0, 0, 0, 150))
+        top.setColorAt(1, QColor(0, 0, 0, 0))
+        painter.fillRect(QRectF(0, 0, self.width(), 64), top)
+        if self.bar and self.bar.isVisible():
+            bottom = QLinearGradient(0, self.height() - 72, 0, self.height())
+            bottom.setColorAt(0, QColor(0, 0, 0, 0))
+            bottom.setColorAt(1, QColor(0, 0, 0, 170))
+            painter.fillRect(QRectF(0, self.height() - 72, self.width(), 72), bottom)
+        bold = painter.font()
+        bold.setPixelSize(14)
+        bold.setWeight(QFont.Weight.DemiBold)
+        painter.setFont(bold)
+        painter.setPen(QColor('#ffffff'))
+        painter.drawText(QRectF(16, 14, self.width() - 110, 22), Qt.AlignmentFlag.AlignVCenter, self.name)
+        badge = QRectF(self.width() - 66, 14, 52, 22)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(DANGER))
+        painter.drawRoundedRect(badge, 6, 6)
+        small = QFont(bold)
+        small.setPixelSize(11)
+        small.setWeight(QFont.Weight.Bold)
+        painter.setFont(small)
+        painter.setPen(QColor('#ffffff'))
+        painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, 'LIVE')
+        center = QPointF(self.width() / 2, self.height() / 2)
+        if not self.playing:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 40))
+            painter.drawEllipse(center, 30, 30)
+            triangle = QPainterPath()
+            triangle.moveTo(center + QPointF(-8, -12))
+            triangle.lineTo(center + QPointF(13, 0))
+            triangle.lineTo(center + QPointF(-8, 12))
+            triangle.closeSubpath()
+            painter.setBrush(QColor('#ffffff'))
+            painter.drawPath(triangle)
+        if self.note:
+            painter.setFont(bold)
+            painter.setPen(QColor(TEXT2 if self.image is None else '#ffffff'))
+            area = QRectF(0, center.y() + (44 if not self.playing else -12), self.width(), 24)
+            painter.drawText(area, Qt.AlignmentFlag.AlignCenter, self.note)
+
+
+class SharePanel(QWidget):
+    """One card per member sharing their screen. One plays at a time (one stream connection):
+    inline, in picture-in-picture or full screen. Picking a quality reconnects at that layer."""
+    STATES = {'connecting': 'Connecting…', 'ended': 'Sharing ended', 'failed': 'Could not connect'}
+
+    def __init__(self):
+        super().__init__()
+        self.control, self.name, self.floating, self.shown = None, None, None, None  # name: who we watch
+        self.cards, self.space = {}, (252, 448)
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(0, 0, 0, 0)
+        self.row.setSpacing(16)
+        self.bar = QWidget()  # hover controls, moved onto the card that plays
+        row = QHBoxLayout(self.bar)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.stop_button = Button('stop', variant='soft', size=36, round_=True, tip='Stop watching')
+        self.stop_button.clicked.connect(lambda: self.stop())
+        self.status = label('', 'status')
+        self.status.setStyleSheet('color: #ffffff;')
+        self.quality = QComboBox()
+        self.quality.setStyleSheet('padding: 4px 10px; border-radius: 10px;')
+        self.quality.addItems(list(QUALITIES))
+        self.quality.setCurrentText(DEFAULT_QUALITY)
+        self.quality.setToolTip('Higher quality needs a faster connection')
+        self.quality.currentTextChanged.connect(self.change_quality)
+        self.pip_button = Button('pip', variant='soft', size=36, round_=True, tip='Picture-in-picture (stays on top)')
+        self.pip_button.clicked.connect(lambda: self.float_out(full=False))
+        self.full_button = Button('expand', variant='soft', size=36, round_=True, tip='Full screen')
+        self.full_button.clicked.connect(lambda: self.float_out(full=True))
+        row.addWidget(self.stop_button)
+        row.addWidget(self.status, 1)
+        for widget in (self.quality, self.pip_button, self.full_button):
+            row.addWidget(widget)
+        self.bar.hide()
+        self.setVisible(False)
+
+    def fit(self, height, width):
+        """Size every card to share the given space at 16:9."""
+        self.space = (height, width)
+        count = max(1, len(self.cards))
+        for card in self.cards.values():
+            card.fit(min(height, (width - 16 * (count - 1)) // count * 9 // 16))
+
+    def set_sharers(self, names):
+        if self.name is not None and self.name not in names:
+            self.stop()
+        for name in set(self.cards) - set(names):
+            self.cards.pop(name).deleteLater()
+        for name in names:
+            if name not in self.cards:
+                card = self.cards[name] = ShareCard(lambda n=name: self.clicked(n), lambda n=name: self.go_full(n))
+                card.name = name
+                self.row.addWidget(card)
+        self.fit(*self.space)
+        self.setVisible(bool(names))
+
+    def sync(self, control):
+        """Follow the call: who shares, and the viewer's newest frame and state. Runs on the call ticker."""
+        self.control = control
+        names = sorted(control.sharing) if control else []
+        if names != sorted(self.cards):
+            self.set_sharers(names)
+        if self.name is None:
+            return
+        card, viewer = self.cards[self.name], control.viewer
+        frame = viewer.frame if viewer else None
+        if frame is not None and frame is not self.shown:
+            self.shown = frame
+            (self.floating or card).set_frame(frame)
+        if self.floating:
+            note = 'Playing in full screen' if self.floating.full else 'Playing in picture-in-picture'
+        else:
+            note = '' if viewer and viewer.state == 'live' else self.STATES.get(viewer.state if viewer else '', 'Connecting…')
+        status = (f'Live · {viewer.size[1]}p' if viewer and viewer.state == 'live' and viewer.size else
+                  self.STATES.get(viewer.state, '') if viewer else 'Connecting…')
+        if (note, status) != (card.note, self.status.text()):
+            card.note = note
+            self.status.setText(status)
+            card.update()
+
+    def clicked(self, name):
+        if name != self.name:
+            self.watch(name)
+        elif self.floating:
+            self.bring_back()
+
+    def watch(self, name):
+        if self.control is None:
+            return
+        self.stop(quiet=True)  # the worker drops the old stream when it starts the new one
+        self.name, self.shown = name, None
+        card = self.cards[name]
+        card.playing, card.bar = True, self.bar
+        self.bar.setParent(card)
+        card.resizeEvent(None)
+        self.bar.setVisible(card.underMouse())
+        self.control.watch.put(('watch', name, self.quality.currentText()))
+        card.update()
+
+    def change_quality(self, quality):
+        if self.name is not None and self.control is not None:
+            self.control.watch.put(('watch', self.name, quality))
+
+    def float_out(self, full):
+        if self.name is None:
+            return
+        if self.floating:
+            self.floating.on_back = lambda: None
+            self.floating.close()
+        self.floating = FloatingScreen(self.bring_back, self.stop, full)
+        self.floating.open()
+        self.shown = None  # repaint the newest frame in the new view
+        self.cards[self.name].set_frame(None)
+
+    def go_full(self, name):
+        if name == self.name:
+            self.float_out(full=True)
+
+    def bring_back(self):
+        floating, self.floating = self.floating, None
+        if floating:
+            floating.on_back = lambda: None
+            floating.close()
+            floating.deleteLater()
+        self.shown = None
+        if self.name in self.cards:
+            self.cards[self.name].update()
+
+    def stop(self, quiet=False):
+        if self.name is not None and self.control is not None and not quiet:
+            self.control.watch.put(('stop',))
+        self.bring_back()
+        card = self.cards.get(self.name)
+        if card:
+            card.playing, card.note, card.bar = False, '', None
+            card.set_frame(None)
+        self.bar.hide()
+        self.bar.setParent(None)
+        self.name = None
+
+    def reset(self):
+        self.stop()
+        self.sync(None)
+
+
 class PartyWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -934,8 +1358,14 @@ class PartyWindow(QWidget):
         center.addStretch()
         self.stage_pages.addWidget(empty)
         members = QWidget()
-        self.members_grid = QGridLayout(members)
-        self.members_grid.setContentsMargins(0, 0, 0, 40)
+        stack = QVBoxLayout(members)
+        stack.setContentsMargins(0, 8, 0, 0)
+        stack.setSpacing(20)
+        self.share_panel = SharePanel()
+        stack.addWidget(self.share_panel, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.members_grid = QGridLayout()
+        stack.addLayout(self.members_grid, 1)
+        self.members_grid.setContentsMargins(0, 0, 0, 12)
         self.members_grid.setHorizontalSpacing(28)
         self.members_grid.setVerticalSpacing(22)
         self.members_grid.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1421,6 +1851,16 @@ class PartyWindow(QWidget):
             self.members_grid.addWidget(tile, position // columns, position % columns)
         if self.control is not None:
             self.show_invites()  # people who joined drop off the invite list
+        self.fit_share()
+
+    def fit_share(self):
+        """Give the shared screen what the member tiles leave free."""
+        rows = max(1, math.ceil(len(self.roster) / 4))
+        self.share_panel.fit(self.stage_pages.height() - 40 - rows * 196 - (rows - 1) * 22, self.stage_pages.width())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.fit_share()
 
     def tick(self):
         control = self.control
@@ -1439,6 +1879,7 @@ class PartyWindow(QWidget):
                 self.set_member_status(name, state)
             face.tick()
         self.meter.set_level(control.mic_level)
+        self.share_panel.sync(control)
         self.update_subtitle(len(self.roster))
 
     def set_member_status(self, name, state):
@@ -1447,7 +1888,8 @@ class PartyWindow(QWidget):
             return
         text, color = {'connecting': ('Connecting…', TEXT2), 'disconnected': ('Disconnected · no audio', DANGER)}.get(
             state, ('Muted for you', TEXT2) if name in self.silenced else
-            ('Muted', TEXT2) if name in self.control.remote_muted else ('', TEXT2))
+            ('Muted', TEXT2) if name in self.control.remote_muted else
+            ('Sharing screen', LIVE) if name in self.control.sharing else ('', TEXT2))
         if status.text() != text:
             status.setText(text)
             status.setStyleSheet(f'color: {color}; font-size: 12px;')  # app QSS overrides setFont
@@ -2513,6 +2955,7 @@ class PartyWindow(QWidget):
                 self.rail.select(PARTIES)
             elif kind == 'done':
                 was_call = self.control is not None
+                self.share_panel.reset()
                 self.busy = False
                 self.control = None
                 self.hosting = False

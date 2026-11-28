@@ -225,7 +225,7 @@ def custom_message(session_id: str, account_id: str, payload: str,
 
 
 def patch_member(session_id: str, property_name: str, value) -> RequestSpec:
-    if property_name not in ("voiceChatActivated", "customData3", "customData4"):
+    if property_name not in ("voiceChatActivated", "customData1", "customData3", "customData4"):
         raise ValueError("Unsupported member property")
     return RequestSpec("PATCH", SESSION_MANAGER,
                        f"/v2/partySessions/{session_id}/members/me",

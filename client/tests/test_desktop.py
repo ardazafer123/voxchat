@@ -7,6 +7,7 @@ import asyncio
 import tempfile
 import time
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 import desktop
 from desktop import PartyWindow
@@ -158,6 +159,68 @@ class DesktopTest(unittest.TestCase):
         temp_store(self)
         auth.save_account('444', 'tester', 'synthetic')
         self.window = PartyWindow()
+
+    def test_share_card_plays_inline_then_pops_out(self):
+        from types import SimpleNamespace
+        import av
+        from live.voice import SessionControl
+        window = self.window
+        window.busy, window.hosting, window.control = True, True, SessionControl()
+        control, panel = window.control, window.share_panel
+        control.members = ['tester', 'Sharer']
+        control.sharing = {'Sharer'}
+        window.tick()
+        self.assertFalse(panel.isHidden())
+        self.assertEqual(window.member_status['Sharer'].text(), 'Sharing screen')
+        panel.cards['Sharer'].mousePressEvent(SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton))
+        self.assertEqual(control.watch.get_nowait(), ('watch', 'Sharer', desktop.DEFAULT_QUALITY))
+        panel.quality.setCurrentText('540p')
+        self.assertEqual(control.watch.get_nowait(), ('watch', 'Sharer', '540p'))
+        control.viewer = SimpleNamespace(state='live', size=(960, 540), frame=av.VideoFrame(960, 540, 'yuv420p'))
+        window.tick()
+        self.assertEqual(panel.status.text(), 'Live · 540p')
+        self.assertLessEqual(panel.cards['Sharer'].width() - panel.cards['Sharer'].image.width(), 1)  # scaled to the card, not kept at stream size
+        panel.pip_button.click()
+        pip = panel.floating
+        self.assertTrue(pip.isVisible())
+        self.assertTrue(pip.windowFlags() & Qt.WindowType.FramelessWindowHint)
+        self.assertTrue(pip.windowFlags() & Qt.WindowType.WindowStaysOnTopHint)
+        control.viewer.frame = av.VideoFrame(960, 540, 'yuv420p')
+        window.tick()
+        self.assertIsNotNone(pip.image)
+        self.assertIsNone(panel.cards['Sharer'].image)
+        pip.mouseDoubleClickEvent(None)  # back into the app, still watching
+        self.assertIsNone(panel.floating)
+        self.assertTrue(control.watch.empty())
+        panel.stop_button.click()
+        self.assertEqual(control.watch.get_nowait(), ('stop',))
+        control.sharing = set()
+        window.tick()
+        self.assertTrue(panel.isHidden())
+
+    def test_two_sharers_get_two_cards_and_one_stream(self):
+        from types import SimpleNamespace
+        from live.voice import SessionControl
+        window = self.window
+        window.busy, window.hosting, window.control = True, True, SessionControl()
+        control, panel = window.control, window.share_panel
+        control.members = ['tester', 'Ann', 'Bob']
+        control.sharing = {'Ann', 'Bob'}
+        window.tick()
+        self.assertEqual(sorted(panel.cards), ['Ann', 'Bob'])
+        click = SimpleNamespace(button=lambda: Qt.MouseButton.LeftButton)
+        panel.cards['Ann'].mousePressEvent(click)
+        self.assertEqual(control.watch.get_nowait(), ('watch', 'Ann', desktop.DEFAULT_QUALITY))
+        panel.cards['Bob'].mousePressEvent(click)  # switches the one stream over
+        self.assertEqual(control.watch.get_nowait(), ('watch', 'Bob', desktop.DEFAULT_QUALITY))
+        self.assertTrue(control.watch.empty())
+        self.assertFalse(panel.cards['Ann'].playing)
+        self.assertIs(panel.bar.parent(), panel.cards['Bob'])
+        control.sharing = {'Ann'}  # Bob stops sharing while watched
+        window.tick()
+        self.assertEqual(control.watch.get_nowait(), ('stop',))
+        self.assertEqual(list(panel.cards), ['Ann'])
+        self.assertIsNone(panel.name)
 
     def test_switch_and_sign_out_accounts(self):
         window = self.window

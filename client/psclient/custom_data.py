@@ -32,3 +32,19 @@ def metadata_fields(value: str | None) -> list:
     except ValueError:
         return []
     return fields if isinstance(fields, list) else []
+
+
+def watching(streamer_ids: list) -> str:
+    """A watcher's customData1: base64 JSON naming the members it watches."""
+    value = {"Watching": [int(a) for a in streamer_ids], "isPointerSendingReady": False}
+    return base64.b64encode(json.dumps(value, separators=(",", ":")).encode()).decode()
+
+
+def streaming(value: str | None) -> dict | None:
+    """The `Streaming` object of a sharing member's customData1, else None."""
+    try:
+        data = json.loads(base64.b64decode(value or ""))
+    except ValueError:
+        return None
+    stream = data.get("Streaming") if isinstance(data, dict) else None
+    return stream if isinstance(stream, dict) else None

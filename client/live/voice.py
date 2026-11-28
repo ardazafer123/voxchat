@@ -23,6 +23,7 @@ from aiortc.contrib.media import MediaRelay
 from live.auth import CONFIG_DIR, is_acknowledged, sign_in
 from live.bridge import BridgeLink, member_bridge_peer
 from live.push_transport import PushConnection
+from live.share_view import ShareViewer
 from live.transport import get, send_spec
 from live.voice_peer import DEBUG, VoicePeer
 from live.whoami import account_id_from_token
@@ -110,6 +111,8 @@ class PartyVoice:
         self.bridge_failed = False
         self.fallback = False
         self.members = {}
+        self.viewer = None       # ShareViewer of the screen being watched, read by the UI
+        self.viewer_task = None
         self._update_members(session)
 
     def _update_members(self, session):
@@ -134,6 +137,55 @@ class PartyVoice:
                 self.pending_offers.pop(account, None)
                 self.remote_ice.pop(account, None)
                 self.sequences.pop(account, None)
+
+    def watch_screen(self, account, quality):
+        """Watch a member's shared screen; called again with another quality, it reconnects."""
+        self.stop_watching(clear_flag=False)
+        self.viewer_task = asyncio.create_task(self._watch(account, quality))
+
+    def stop_watching(self, clear_flag=True):
+        if self.viewer_task:
+            self.viewer_task.cancel()
+            if clear_flag:
+                asyncio.create_task(self._clear_watching())
+        self.viewer_task = self.viewer = None
+
+    async def _clear_watching(self):
+        with contextlib.suppress(Exception):
+            # An empty object clears the watching flag.
+            await asyncio.to_thread(send_spec, rest.patch_member(self.sid, 'customData1', 'e30='), self.token)
+
+    async def _watch(self, account, quality):
+        member = self.members.get(account, {})
+        name = member.get('onlineId') or 'Player'
+        viewer = self.viewer = ShareViewer(self.token, self.sid, None, quality, self.output, f'{name} (screen)', self.log)
+        try:
+            # Ask for the full stream; its connection info then shows up in the member's customData1.
+            sent = await asyncio.to_thread(send_spec, rest.custom_message(
+                self.sid, account, signaling.share_request(self.account), member.get('platform', 'PS5')), self.token)
+            self.log(f'Screen view: asked {name} for the stream: HTTP {sent.status}.')
+            for _ in range(15):
+                stream = custom_data.streaming(member.get('customData1')) or {}
+                if 'ConnectionInfo' in stream and 'SessionId' in stream:
+                    break
+                await asyncio.sleep(1)
+                session = session_from_response(await asyncio.to_thread(send_spec, rest.get_party(self.sid), self.token), self.sid)
+                member = next((m for m in session.get('members', []) if str(m.get('accountId')) == account), {})
+            else:
+                viewer.state = 'failed'
+                self.log(f'Screen view: {name} did not send stream details.')
+                return
+            viewer.stream = stream
+            # Flag the watch once the stream details are there.
+            watched = await asyncio.to_thread(send_spec, rest.patch_member(
+                self.sid, 'customData1', custom_data.watching([account])), self.token)
+            self.log(f'Screen view: watching flag: HTTP {watched.status}.')
+            await viewer.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # never break voice
+            viewer.state = 'failed'
+            self.log(f'Screen view failed: {type(exc).__name__}')
 
     def bridge_peer_account(self, peer_id):
         bid = self.bridge and self.bridge.bridge_id
@@ -303,6 +355,8 @@ class PartyVoice:
         self.log('Fresh WebRTC answer delivered: HTTP 204.')
 
     async def close(self):
+        if self.viewer_task:
+            self.viewer_task.cancel()
         closing = [peer.close() for peer in self.peers.values()] + ([self.bridge.close()] if self.bridge else [])
         await asyncio.gather(*closing, return_exceptions=True)
         self.source.stop()
@@ -385,6 +439,9 @@ class SessionControl:
         self.remote_muted = set()  # onlineIds that turned their voice chat off
         self.silenced = set()      # onlineIds the UI muted locally; replaced whole by the UI
         self.invites = queue.SimpleQueue()  # {'account_id', 'online_id'} from the UI thread
+        self.sharing = set()       # onlineIds sharing their screen
+        self.watch = queue.SimpleQueue()  # ('watch', onlineId, quality) or ('stop',) from the UI thread
+        self.viewer = None         # ShareViewer being watched; the UI reads state/frame/size
 
 
 async def run(args, control=None, log=print):
@@ -477,6 +534,18 @@ async def run(args, control=None, log=print):
                 control.states = {names[a]: voice.state(a) for a in names if a != account}
                 control.remote_muted = {names[a] for a, m in voice.members.items() if a != account and mic_muted(m)}
                 output.silenced = {a for a, n in names.items() if n in control.silenced}
+                control.sharing = {names[a] for a, m in voice.members.items() if a != account and m.get('isOnShareScreen')}
+                while True:
+                    try:
+                        request = control.watch.get_nowait()
+                    except queue.Empty:
+                        break
+                    who = next((a for a, n in names.items() if n == request[1]), None) if request[0] == 'watch' else None
+                    if who:
+                        voice.watch_screen(who, request[2])
+                    else:
+                        voice.stop_watching()
+                control.viewer = voice.viewer
                 if DEBUG:
                     now = time.monotonic()
                     for a, seen in list(output.last_frame.items()):

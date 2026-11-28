@@ -38,3 +38,22 @@ class SignalingTest(unittest.TestCase):
         parts = signaling.payloads(signaling.description(signaling.identity('123'), signaling.identity('456'), 'x' * 100, 'offer', 1, 1), 80)
         for part in reversed(parts):
             self.assertIsNone(decoder.feed(part))
+
+
+class ShareScreenDataTest(unittest.TestCase):
+    def test_share_request_layout(self):
+        import base64
+        raw = base64.b64decode(signaling.share_request('123').removeprefix(signaling.PREFIX))
+        self.assertEqual(signaling.HEADER.unpack_from(raw), (1, 0, 4, 0, 123, 100001, 0, 0, 4))
+        self.assertEqual(raw[signaling.HEADER.size:], b'\x02\x00\x00\x00')
+
+    def test_watching_and_streaming(self):
+        import base64
+        from psclient import custom_data
+        self.assertEqual(json.loads(base64.b64decode(custom_data.watching([123]))),
+                         {'Watching': [123], 'isPointerSendingReady': False})
+        shared = base64.b64encode(json.dumps({'Streaming': {'SessionId': 's'}}).encode()).decode()
+        self.assertEqual(custom_data.streaming(shared), {'SessionId': 's'})
+        self.assertIsNone(custom_data.streaming(custom_data.watching(['1'])))
+        self.assertIsNone(custom_data.streaming('not base64!'))
+        self.assertIsNone(custom_data.streaming(None))
